@@ -1,0 +1,345 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================
+    // AUTHENTICATION / ROLE HELPERS
+    // =========================================================
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function currentUserExists() {
+      return signedIn()
+        && exists(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        );
+    }
+
+    function currentUser() {
+      return get(
+        /databases/$(database)/documents/users/$(request.auth.uid)
+      );
+    }
+
+    function hasRole(roleName) {
+      return currentUserExists()
+        && currentUser().data.role == roleName;
+    }
+
+    function isAdmin() {
+      return hasRole("admin");
+    }
+
+    function isRider() {
+      return hasRole("rider");
+    }
+
+    function isCustomer() {
+      return hasRole("customer");
+    }
+
+
+    // =========================================================
+    // USERS
+    // =========================================================
+
+    match /users/{uid} {
+
+      // A user can read their own profile.
+      // Admins and riders can read rider/customer profiles needed
+      // by their dashboards.
+      allow read: if signedIn()
+        && (
+          request.auth.uid == uid
+          || isAdmin()
+          || isRider()
+        );
+
+
+      // Customer registration can create only its own customer
+      // profile. Staff profiles are created by an administrator.
+      allow create: if signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.role == "customer"
+        && (
+          !request.resource.data.keys().hasAny(["uid"])
+          || request.resource.data.uid == request.auth.uid
+        );
+
+
+      // Admin can update any user.
+      //
+      // A user may update their own profile without changing role.
+      // The UID, when present, must remain their own UID.
+      allow update: if signedIn()
+        && (
+          isAdmin()
+
+          ||
+
+          (
+            request.auth.uid == uid
+            && request.resource.data.get("role", null)
+               == resource.data.get("role", null)
+            && request.resource.data.get("uid", request.auth.uid)
+               == request.auth.uid
+            && request.resource.data.diff(resource.data)
+              .affectedKeys()
+              .hasOnly([
+                "uid",
+                "name",
+                "phone",
+                "availability",
+                "updatedAt"
+              ])
+          )
+        );
+
+
+      allow delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // PRODUCTS
+    // =========================================================
+
+    match /products/{productId} {
+
+      allow read: if true;
+
+      allow create, update, delete: if isAdmin();
+    }
+
+
+    // =========================================================
+    // ORDERS
+    // =========================================================
+
+    match /orders/{orderId} {
+
+      // -------------------------------------------------------
+      // CUSTOMER CREATES ORDER
+      // -------------------------------------------------------
+
+      allow create: if signedIn()
+        && isCustomer()
+        && request.resource.data.customer_id == request.auth.uid
+        && request.resource.data.status == "Pending";
+
+
+      // -------------------------------------------------------
+      // READ
+      // -------------------------------------------------------
+      //
+      // Customer -> own orders
+      // Admin    -> all orders
+      // Rider    -> Ready orders OR orders assigned to rider
+      //
+      // -------------------------------------------------------
+
+      allow read: if signedIn()
+        && (
+          (
+            isCustomer()
+            && resource.data.customer_id == request.auth.uid
+          )
+
+          ||
+
+          isAdmin()
+
+          ||
+
+          (
+            isRider()
+            && resource.data.status == "Ready"
+          )
+
+          ||
+
+          (
+            isRider()
+            && resource.data.get("rider_id", null)
+               == request.auth.uid
+          )
+        );
+
+
+      // -------------------------------------------------------
+      // UPDATE
+      // -------------------------------------------------------
+
+      allow update: if signedIn()
+        && (
+
+          // ===================================================
+          // ADMIN
+          // ===================================================
+
+          isAdmin()
+
+
+          // ===================================================
+          // CUSTOMER CANCELS PENDING ORDER
+          // ===================================================
+
+          ||
+
+          (
+            isCustomer()
+            && resource.data.customer_id == request.auth.uid
+            && resource.data.status == "Pending"
+            && request.resource.data.status == "Cancelled"
+            && request.resource.data.diff(resource.data)
+              .affectedKeys()
+              .hasOnly([
+                "status",
+                "updatedAt"
+              ])
+          )
+
+
+          // ===================================================
+          // CUSTOMER CONFIRMS DELIVERY
+          // ===================================================
+
+          ||
+
+          (
+            isCustomer()
+            && resource.data.customer_id == request.auth.uid
+            && resource.data.status == "Delivered"
+            && request.resource.data.status == "Completed"
+            && request.resource.data.diff(resource.data)
+              .affectedKeys()
+              .hasOnly([
+                "status",
+                "customerReceivedAt",
+                "completedAt",
+                "updatedAt"
+              ])
+          )
+
+
+          // ===================================================
+          // RIDER CLAIMS A READY ORDER
+          // ===================================================
+          //
+          // The pickup must not already belong to another rider.
+          // Missing rider_id and null rider_id are both treated as
+          // unassigned.
+          //
+          // ===================================================
+
+          ||
+
+          (
+            isRider()
+            && resource.data.status == "Ready"
+            && (
+              resource.data.get("rider_id", null) == null
+              || resource.data.get("rider_id", null) == ""
+            )
+            && request.resource.data.status == "Ready"
+            && request.resource.data.rider_id == request.auth.uid
+            && request.resource.data.diff(resource.data)
+              .affectedKeys()
+              .hasOnly([
+                "rider_id",
+                "rider_name",
+                "updatedAt"
+              ])
+          )
+
+
+          // ===================================================
+          // RIDER RELEASES THEIR READY ORDER
+          // ===================================================
+
+          ||
+
+          (
+            isRider()
+            && resource.data.status == "Ready"
+            && resource.data.get("rider_id", null)
+               == request.auth.uid
+            && request.resource.data.status == "Ready"
+            && request.resource.data.get("rider_id", null) == null
+            && request.resource.data.diff(resource.data)
+              .affectedKeys()
+              .hasOnly([
+                "rider_id",
+                "rider_name",
+                "updatedAt"
+              ])
+          )
+
+
+          // ===================================================
+          // RIDER STARTS DELIVERY
+          // ===================================================
+
+          ||
+
+          (
+            isRider()
+            && resource.data.status == "Ready"
+            && resource.data.get("rider_id", null)
+               == request.auth.uid
+            && request.resource.data.status == "Delivery"
+            && request.resource.data.get("rider_id", null)
+               == request.auth.uid
+            && request.resource.data.changedBy == request.auth.uid
+            && request.resource.data.changedRole == "rider"
+            && request.resource.data.diff(resource.data)
+              .affectedKeys()
+              .hasOnly([
+                "status",
+                "updatedAt",
+                "changedBy",
+                "changedRole"
+              ])
+          )
+
+
+          // ===================================================
+          // RIDER MARKS DELIVERY AS DELIVERED
+          // ===================================================
+
+          ||
+
+          (
+            isRider()
+            && resource.data.status == "Delivery"
+            && resource.data.get("rider_id", null)
+               == request.auth.uid
+            && request.resource.data.status == "Delivered"
+            && request.resource.data.get("rider_id", null)
+               == request.auth.uid
+            && request.resource.data.changedBy == request.auth.uid
+            && request.resource.data.changedRole == "rider"
+            && request.resource.data.diff(resource.data)
+              .affectedKeys()
+              .hasOnly([
+                "status",
+                "updatedAt",
+                "changedBy",
+                "changedRole",
+                "completedAt"
+              ])
+          )
+        );
+
+
+      // -------------------------------------------------------
+      // DELETE
+      // -------------------------------------------------------
+
+      allow delete: if isAdmin();
+    }
+  }
+}

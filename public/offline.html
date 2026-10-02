@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Monday's Home Cafe - Offline</title>
+    <meta name="theme-color" content="#6b3e26" />
+
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        min-height: 100%;
+      }
+
+      body {
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 20px;
+        font-family: Arial, Helvetica, sans-serif;
+        background: #f5f1ed;
+        color: #3e2723;
+      }
+
+      .offline-container {
+        width: 100%;
+        max-width: 540px;
+        padding: 45px 35px;
+        text-align: center;
+        background: #ffffff;
+        border-radius: 20px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+      }
+
+      .offline-logo {
+        display: block;
+        width: 120px;
+        height: 120px;
+        object-fit: contain;
+        margin: 0 auto 20px;
+      }
+
+      .coffee-icon {
+        font-size: 60px;
+        line-height: 1;
+        margin-bottom: 20px;
+      }
+
+      h1 {
+        margin: 0 0 20px;
+        font-size: 36px;
+        font-family: Georgia, "Times New Roman", serif;
+        color: #3e2723;
+      }
+
+      p {
+        margin: 10px auto;
+        max-width: 450px;
+        line-height: 1.6;
+        font-size: 17px;
+        color: #666;
+      }
+
+      .offline-message {
+        margin-top: 20px;
+      }
+
+      .retry-button {
+        display: inline-block;
+        margin-top: 25px;
+        padding: 13px 30px;
+        border: none;
+        border-radius: 10px;
+        background: #6b3e26;
+        color: #ffffff;
+        font-size: 16px;
+        cursor: pointer;
+      }
+
+      .retry-button:hover {
+        opacity: 0.9;
+      }
+
+      .status {
+        margin-top: 20px;
+        font-size: 14px;
+        color: #888;
+      }
+
+      @media (max-width: 600px) {
+        .offline-container {
+          padding: 40px 25px;
+        }
+
+        .offline-logo {
+          width: 100px;
+          height: 100px;
+        }
+
+        .coffee-icon {
+          font-size: 50px;
+        }
+
+        h1 {
+          font-size: 30px;
+        }
+
+        p {
+          font-size: 16px;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <main class="offline-container">
+      <img
+        id="offlineLogo"
+        src=""
+        alt="Monday's Home Cafe"
+        class="offline-logo"
+      />
+
+      <div class="coffee-icon" aria-hidden="true">☕</div>
+
+      <h1>You're Offline</h1>
+
+      <p>
+        Monday's Home Cafe is currently unable to connect to the internet.
+      </p>
+
+      <p class="offline-message">
+        Please check your internet connection and try again.
+      </p>
+
+      <button
+        class="retry-button"
+        type="button"
+        onclick="window.location.reload()"
+      >
+        Try Again
+      </button>
+
+      <div class="status" id="connectionStatus">
+        You are currently offline.
+      </div>
+    </main>
+
+    <script>
+      function setOfflineLogo() {
+        const logo = document.getElementById("offlineLogo");
+
+        if (!logo) {
+          return;
+        }
+
+        if (
+          navigator.serviceWorker &&
+          navigator.serviceWorker.controller
+        ) {
+          const workerUrl = new URL(
+            navigator.serviceWorker.controller.scriptURL
+          );
+
+          const projectRoot = workerUrl.pathname.replace(
+            /\/sw\.js$/,
+            "/"
+          );
+
+          logo.src = projectRoot + "images/logo.png";
+        } else {
+          logo.src = "./images/logo.png";
+        }
+      }
+
+      setOfflineLogo();
+
+      function updateConnectionStatus() {
+        const status =
+          document.getElementById("connectionStatus");
+
+        if (!status) {
+          return;
+        }
+
+        if (navigator.onLine) {
+          status.textContent =
+            "Internet connection restored. Reloading...";
+
+          setTimeout(() => {
+            window.location.reload();
+          }, 500);
+        } else {
+          status.textContent =
+            "You are currently offline.";
+        }
+      }
+
+      updateConnectionStatus();
+
+      window.addEventListener(
+        "online",
+        updateConnectionStatus
+      );
+
+      window.addEventListener(
+        "offline",
+        updateConnectionStatus
+      );
+    </script>
+  </body>
+</html>

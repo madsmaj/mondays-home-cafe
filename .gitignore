@@ -1,5 +1,17 @@
+
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+
+# Firebase generated cache
+.firebase/
+
+# Environment variables
 .env
 .env.*
 !.env.example
+
+# Log files
+*.log

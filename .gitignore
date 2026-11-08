@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build files
+dist/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Firebase
+.firebase/
+
+# Debug logs
+npm-debug.log*

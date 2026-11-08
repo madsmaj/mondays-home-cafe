@@ -19,6 +19,13 @@ export function Navbar({ simple = false, showLogout = false }) {
           <img src="/images/logo.png" alt="Monday's Home Cafe" />
         </Link>
       </div>
+      {simple && !showLogout && (
+        <div className="nav-icons login-home-nav">
+          <Link aria-label="Return to Home" title="Return to Home" to="/">
+            <i className="fa-solid fa-house" />
+          </Link>
+        </div>
+      )}
       {(!simple || showLogout) && (
         <div className="nav-icons">
           <Link aria-label="Home" to="/">

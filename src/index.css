@@ -2085,3 +2085,45 @@ input, select, textarea { max-width: 100%; box-sizing: border-box; }
   .add-cart { padding: 6px 7px; font-size: 9px; }
   .footer-links { gap: 16px 10px; }
 }
+
+
+/* Customer login: brown Back to Home button */
+.back-home-btn {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 auto 20px;
+  background: var(--primary);
+  color: #fff;
+  text-decoration: none;
+}
+.back-home-btn:hover {
+  background: var(--primary-dark);
+  color: #fff;
+  transform: translateY(-2px);
+}
+
+
+/* Customer login header home control, styled to match the reference screenshot */
+.login-home-nav a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--coffee);
+  font-size: 25px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  transition: background .2s ease, color .2s ease, transform .2s ease;
+}
+.login-home-nav a:hover {
+  background: var(--soft);
+  color: var(--primary-dark);
+  transform: translateY(-1px);
+}
+.login-home-nav a:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}

@@ -37,3 +37,12 @@ A rider must have:
 4. A separate optional `rider_id` such as `RIDER-001`.
 
 Do not use `RIDER-001` as the Firestore document ID unless it is also the Firebase Authentication UID.
+
+
+## Customer login and Netlify deployment follow-up
+
+- Added a brown **Back to Home** button to the customer login view. It routes to `/` using React Router and is not shown on admin/rider login.
+- Bumped the service-worker cache to `mondays-cafe-v3` to refresh cached app assets after deployment.
+- Google OAuth `auth/unauthorized-domain` is a Firebase Console configuration issue, not something frontend code can override. Add `mondays-home-cafe.netlify.app` under Firebase Console → Authentication → Settings → Authorized domains. Also ensure Google is enabled under Authentication → Sign-in method.
+- After changing Firebase settings, redeploy and test Google login in a fresh/incognito window. Clear the site's old service worker/cache if the old page continues to appear.
+- Never commit `.env`; recreate it locally from `.env.example` and add the same VITE variables to Netlify environment variables. The fixed archive intentionally excludes `.env`, `.git`, `node_modules`, and generated `dist`.

@@ -1,6 +1,6 @@
 // Monday's Home Cafe - Service Worker v1
 
-const CACHE_NAME = "mondays-cafe-v2";
+const CACHE_NAME = "mondays-cafe-v3";
 const OFFLINE_URL = "/offline.html";
 
 const OFFLINE_ASSETS = [
@@ -13,7 +13,7 @@ const OFFLINE_ASSETS = [
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then(async (cache) => {
-      console.log("[SW] Installing v2...");
+      console.log("[SW] Installing v3...");
 
       // Cache each file separately so one missing file
       // does not cause the whole installation to fail.

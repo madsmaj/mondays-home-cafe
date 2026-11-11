@@ -33,12 +33,22 @@ function availabilityLabel(value) {
 function availabilityHelp(value) {
   switch (value) {
     case "Available":
-      return "You are online and can accept a Ready pickup.";
+      return "You are visible to the admin and can accept one available pickup.";
     case "Busy":
-      return "You already have an active pickup. Finish the delivery before going offline.";
+      return "You have an active order. Your status will return to Online after you confirm the customer received it.";
     default:
-      return "You are not accepting new pickups. Ready orders may still be visible, but you cannot accept them until you go online.";
+      return "You are not accepting new pickups. You can go online whenever you are ready to work.";
   }
+}
+
+function formatStatusTime(value) {
+  if (!value) return "Not available";
+  const date = typeof value?.toDate === "function"
+    ? value.toDate()
+    : new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "Not available"
+    : date.toLocaleString();
 }
 
 export default function Rider() {
@@ -47,7 +57,6 @@ export default function Rider() {
 
   const [orders, setOrders] = useState([]);
   const [riders, setRiders] = useState([]);
-  const [showAvailability, setShowAvailability] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -101,9 +110,22 @@ export default function Rider() {
 
     load();
 
-    const timer = window.setInterval(load, 8000);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) load();
+    }, 12000);
 
-    return () => window.clearInterval(timer);
+    const refreshOnFocus = () => {
+      if (!document.hidden) load();
+    };
+
+    document.addEventListener("visibilitychange", refreshOnFocus);
+    window.addEventListener("focus", refreshOnFocus);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshOnFocus);
+      window.removeEventListener("focus", refreshOnFocus);
+    };
   }, [riderId]);
 
   const me = useMemo(
@@ -115,15 +137,21 @@ export default function Rider() {
   );
 
   const availability = me?.availability || rider?.availability || "Offline";
+  const statusUpdatedAt = me?.updatedAt || rider?.updatedAt;
 
+  // Keep a pickup in this section after the rider accepts it. This lets the
+  // Accept Pickup button change in-place to Mark as Delivered, as requested.
   const readyOrders = useMemo(
     () =>
-      orders.filter(
-        (order) =>
-          order.status === "Ready" &&
-          !order.rider_id,
-      ),
-    [orders],
+      orders.filter((order) => {
+        const unassignedReady =
+          order.status === "Ready" && !order.rider_id;
+        const acceptedByMe =
+          order.status === "Accepted" &&
+          String(order.rider_id || "") === String(riderId);
+        return unassignedReady || acceptedByMe;
+      }),
+    [orders, riderId],
   );
 
   const myActiveOrders = useMemo(
@@ -142,7 +170,7 @@ export default function Rider() {
         .filter(
           (order) =>
             String(order.rider_id || "") === String(riderId) &&
-            order.status === "Delivered",
+            ["Received", "Delivered"].includes(order.status),
         )
         .slice(0, 5),
     [orders, riderId],
@@ -201,7 +229,7 @@ export default function Rider() {
     }
 
     const confirmed = window.confirm(
-      "Accept this pickup?\n\nYou will become Busy until you release this pickup or mark it Delivered.",
+      "Accept this pickup?\n\nThis order will be assigned to you and your status will change to BUSY. After the customer receives the order, tap “Mark as Delivered”. The admin will see the receipt confirmation, and the customer will see “Delivered”.",
     );
 
     if (!confirmed) return;
@@ -211,13 +239,37 @@ export default function Rider() {
       setError("");
       setMessage("");
 
-      await apiRequest("claim-order", {
+      const result = await apiRequest("claim-order", {
         method: "POST",
         body: { order_id: orderId },
       });
 
+      if (!result?.success) {
+        throw new Error(result?.message || "The pickup was not assigned. Please try again.");
+      }
+
+      // Update this screen immediately after the Firestore transaction succeeds.
+      // The customer and admin dashboards receive the same order update from Firestore.
+      setOrders((previous) =>
+        previous.map((order) =>
+          order.id === orderId
+            ? {
+                ...order,
+                status: "Accepted",
+                rider_id: riderId,
+                rider_name: rider.name || "You",
+              }
+            : order,
+        ),
+      );
+      auth.saveStaff({
+        ...rider,
+        availability: "Busy",
+        updatedAt: new Date().toISOString(),
+      });
+
       setMessage(
-        "Pickup accepted. You are now Busy with this order.",
+        "Pickup accepted. You are now BUSY and this order is assigned to you. When you leave the cafe, tap “Start Delivery”.",
       );
 
       await load();
@@ -262,10 +314,7 @@ export default function Rider() {
 
   const changeStatus = async (orderId, status) => {
     const confirmed =
-      status !== "Delivery" ||
-      window.confirm(
-        "Start delivery for this pickup?\n\nYour status will remain Busy until the order is delivered.",
-      );
+      true;
 
     if (!confirmed) return;
 
@@ -283,9 +332,7 @@ export default function Rider() {
       });
 
       setMessage(
-        status === "Delivery"
-          ? "Delivery started. Stay Busy until the order is delivered."
-          : "Order marked as Delivered. You are now Available.",
+        "Receipt confirmed. The admin now sees the order as Received, the customer sees Delivered, and you are now Available.",
       );
 
       await load();
@@ -302,9 +349,9 @@ export default function Rider() {
     <div className="delivery-card">
       <h2>{order.order_number || order.id}</h2>
       <div className="order-status">
-        {order.status === "Ready"
-          ? "📦 Ready — Your Pickup"
-          : "🛵 Out for Delivery"}
+        {order.status === "Accepted"
+          ? "📦 Pickup accepted — assigned to you"
+          : "🛵 Out for delivery — customer is waiting"}
       </div>
 
       <p>
@@ -324,15 +371,23 @@ export default function Rider() {
       <p>₱{money(order.total)}</p>
 
       <div className="delivery-actions">
-        {order.status === "Ready" && (
+        {order.status === "Accepted" && (
           <>
             <button
               type="button"
               className="btn btn-primary"
               disabled={busy}
-              onClick={() => changeStatus(order.id, "Delivery")}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Has the customer received this order?\n\nThe customer will see Delivered and the admin will see Received.",
+                  )
+                ) {
+                  changeStatus(order.id, "Received");
+                }
+              }}
             >
-              Start Delivery 🛵
+              {busy ? "Updating…" : "Mark as Delivered ✓"}
             </button>
 
             <button
@@ -346,6 +401,7 @@ export default function Rider() {
           </>
         )}
 
+        {/* Legacy assigned orders from the previous Delivery step */}
         {order.status === "Delivery" && (
           <button
             type="button"
@@ -354,14 +410,14 @@ export default function Rider() {
             onClick={() => {
               if (
                 window.confirm(
-                  "Confirm that this order has been delivered to the customer?",
+                  "Has the customer received this order?\n\nThe customer will see Delivered and the admin will see Received.",
                 )
               ) {
-                changeStatus(order.id, "Delivered");
+                changeStatus(order.id, "Received");
               }
             }}
           >
-            Mark Delivered 📍
+            {busy ? "Updating…" : "Mark as Delivered ✓"}
           </button>
         )}
       </div>
@@ -375,7 +431,7 @@ export default function Rider() {
       <section className="section">
         <h1 className="section-title">🛵 Rider Dashboard</h1>
         <p className="section-subtitle">
-          Accept pickups, deliver orders, and manage your online status.
+Accept a ready order, deliver it to the customer, and mark it delivered. The customer will confirm receipt, and your availability updates automatically.
         </p>
 
         {/* =====================================================
@@ -404,38 +460,73 @@ export default function Rider() {
 
           <p>{availabilityHelp(availability)}</p>
 
-          {availability === "Offline" && (
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={busy}
-              onClick={() => setAvailability("Available")}
-            >
-              🟢 Go Online
-            </button>
-          )}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 16,
+              flexWrap: "wrap",
+              padding: 16,
+              marginTop: 16,
+              borderRadius: 14,
+              background: availability === "Available"
+                ? "rgba(22, 163, 74, 0.09)"
+                : availability === "Busy"
+                  ? "rgba(234, 88, 12, 0.09)"
+                  : "rgba(107, 114, 128, 0.09)",
+            }}
+          >
+            <div>
+              <strong>
+                {availability === "Available"
+                  ? "You are accepting pickups"
+                  : availability === "Busy"
+                    ? "You are occupied with an order"
+                    : "You are not accepting pickups"}
+              </strong>
+              <p style={{ margin: "4px 0 0", fontSize: 13 }}>
+                {availability === "Busy"
+                  ? "Complete or release your current pickup to become available again."
+                  : availability === "Available"
+                    ? "Switch off when you need a break or are unavailable."
+                    : "Switch on when you are ready to receive a pickup."}
+              </p>
+            </div>
 
-          {availability === "Available" && (
             <button
               type="button"
-              className="btn btn-secondary"
-              disabled={busy}
-              onClick={() => setAvailability("Offline")}
+              role="switch"
+              aria-checked={availability === "Available"}
+              aria-label="Rider availability"
+              className={availability === "Available" ? "btn btn-primary" : "btn btn-secondary"}
+              disabled={busy || availability === "Busy"}
+              onClick={() =>
+                setAvailability(
+                  availability === "Available" ? "Offline" : "Available",
+                )
+              }
+              style={{
+                minWidth: 170,
+                minHeight: 48,
+                opacity: busy || availability === "Busy" ? 0.7 : 1,
+                cursor: busy || availability === "Busy" ? "not-allowed" : "pointer",
+              }}
             >
-              ⚫ Go Offline
+              {busy
+                ? "Updating status…"
+                : availability === "Busy"
+                  ? "🔒 Busy — Locked"
+                  : availability === "Available"
+                    ? "🟢 Online · Tap to go offline"
+                    : "⚫ Offline · Tap to go online"}
             </button>
-          )}
+          </div>
 
-          {availability === "Busy" && (
-            <button
-              type="button"
-              className="btn btn-secondary"
-              disabled
-              title="Finish or release your current pickup first."
-            >
-              🔴 Busy — Finish Current Pickup
-            </button>
-          )}
+          <p style={{ fontSize: 12, opacity: 0.75, marginTop: 10 }}>
+            Last status update: {formatStatusTime(statusUpdatedAt)}
+          </p>
+
 
           {message && (
             <p
@@ -470,67 +561,9 @@ export default function Rider() {
         )}
 
         {/* =====================================================
-            RIDER AVAILABILITY
-        ====================================================== */}
-        <div className="delivery-actions" style={{ marginTop: 20 }}>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => setShowAvailability((value) => !value)}
-          >
-            {showAvailability
-              ? "Hide Rider Availability"
-              : "View Rider Availability"}{" "}
-            👥
-          </button>
-        </div>
-
-        {showAvailability && (
-          <div id="rider-availability" style={{ marginTop: 20 }}>
-            <div className="category-cards">
-              {riders.map((otherRider) => (
-                <div
-                  className="category-card"
-                  key={otherRider.id || otherRider.rider_id}
-                >
-                  <h3>🛵 {otherRider.name || "Rider"}</h3>
-                  <p>
-                    <strong>
-                      {otherRider.user_code || otherRider.rider_id || "—"}
-                    </strong>
-                  </p>
-                  <p>{availabilityLabel(otherRider.availability)}</p>
-
-                  {otherRider.current_order_number ? (
-                    <>
-                      <p>Order: {otherRider.current_order_number}</p>
-                      <p>{otherRider.current_order_status || ""}</p>
-                    </>
-                  ) : (
-                    <p>
-                      {otherRider.availability === "Available"
-                        ? "Ready to accept a pickup."
-                        : otherRider.availability === "Busy"
-                          ? "Currently delivering."
-                          : "Not accepting pickups."}
-                    </p>
-                  )}
-                </div>
-              ))}
-
-              {!riders.length && (
-                <div className="empty-cart">
-                  <p>No rider availability information is available.</p>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* =====================================================
             CURRENT PICKUP
         ====================================================== */}
-        <h2 className="dashboard-title">🛵 My Current Pickup</h2>
+        <h2 className="dashboard-title" id="current-pickup">🛵 My Current Pickup</h2>
 
         {loading ? (
           <div className="empty-cart">
@@ -547,7 +580,7 @@ export default function Rider() {
               {canAccept
                 ? "You are online and ready to accept a pickup."
                 : isBusy
-                  ? "Your rider status is Busy. Refresh the dashboard if your current pickup is not shown."
+                  ? "Your rider status is Busy. Use the current delivery section above to complete your active order."
                   : "Go Online when you are ready to accept a pickup."}
             </p>
           </div>
@@ -556,7 +589,7 @@ export default function Rider() {
         {/* =====================================================
             READY PICKUPS
         ====================================================== */}
-        <h2 className="dashboard-title">📦 Ready for Pickup</h2>
+        <h2 className="dashboard-title">📦 Pickup Queue & Accepted Pickup</h2>
 
         {loading ? (
           <div className="empty-cart">
@@ -576,7 +609,7 @@ export default function Rider() {
                 </h3>
                 <p>
                   {availability === "Busy"
-                    ? "Finish your current pickup before accepting another one."
+                    ? "Complete your current delivery before accepting another one."
                     : "Go Online to enable the Accept Pickup button."}
                 </p>
               </div>
@@ -585,7 +618,11 @@ export default function Rider() {
             {readyOrders.map((order) => (
               <div className="delivery-card" key={order.id}>
                 <h2>{order.order_number || order.id}</h2>
-                <div className="order-status">📦 Ready for Pickup</div>
+                <div className="order-status">
+                  {order.status === "Accepted"
+                    ? "🟠 Pickup accepted — assigned to you (Busy)"
+                    : "📦 Ready for Pickup"}
+                </div>
 
                 <h3>👤 Customer</h3>
                 <p>{order.customer_name || "Customer"}</p>
@@ -599,18 +636,45 @@ export default function Rider() {
                 <p>₱{money(order.total)}</p>
 
                 <div className="delivery-actions">
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    disabled={!canAccept || busy}
-                    onClick={() => claim(order.id)}
-                  >
-                    {canAccept
-                      ? "Accept Pickup 🛵"
-                      : availability === "Busy"
-                        ? "Busy — Finish Current Pickup"
-                        : "Go Online to Accept"}
-                  </button>
+                  {order.status === "Accepted" ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={busy}
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            "Have you handed this order to the customer?\n\nThis confirms the handover. The customer will see Delivered and the admin will see Received.",
+                          )
+                        ) {
+                          changeStatus(order.id, "Received");
+                        }
+                      }}
+                    >
+                      {busy ? "Please wait…" : "Mark as Delivered ✓"}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className={canAccept ? "btn btn-primary" : "btn btn-secondary"}
+                      disabled={busy || !canAccept}
+                      onClick={() => {
+                        if (canAccept) {
+                          claim(order.id);
+                        } else if (availability === "Offline") {
+                          setAvailability("Available");
+                        }
+                      }}
+                    >
+                      {busy
+                        ? "Please wait…"
+                        : canAccept
+                          ? "Accept Pickup 🛵"
+                          : availability === "Busy"
+                            ? "You are Busy with another pickup"
+                            : "Go Online to Accept"}
+                    </button>
+                  )}
                 </div>
               </div>
             ))}
@@ -627,13 +691,14 @@ export default function Rider() {
         {/* =====================================================
             RECENTLY DELIVERED
         ====================================================== */}
-        <h2 className="dashboard-title">✅ Recently Delivered</h2>
+        <h2 className="dashboard-title">✅ Recently Received</h2>
 
         {myDeliveredOrders.length ? (
           myDeliveredOrders.map((order) => (
             <div className="delivery-card" key={order.id}>
               <h2>{order.order_number || order.id}</h2>
-              <div className="order-status">✅ Delivered</div>
+              <div className="order-status">✅ Received — Handover Confirmed</div>
+              <p>You confirmed that the customer received this order.</p>
               <p>
                 <strong>Customer:</strong>{" "}
                 {order.customer_name || "Customer"}
@@ -645,8 +710,8 @@ export default function Rider() {
           ))
         ) : (
           <div className="empty-cart">
-            <h2>No completed deliveries yet</h2>
-            <p>Your delivered pickups will appear here.</p>
+            <h2>No received orders yet</h2>
+            <p>Orders you have confirmed as received will appear here.</p>
           </div>
         )}
       </section>

@@ -1,4 +1,3 @@
-
 import firebase from "firebase/compat/app";
 import "firebase/compat/auth";
 import "firebase/compat/firestore";
@@ -12,43 +11,23 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-// Check Firebase configuration
-if (
-  !firebaseConfig.apiKey ||
-  firebaseConfig.apiKey.includes("PASTE_YOUR") ||
-  !firebaseConfig.projectId ||
-  !firebaseConfig.appId
-) {
-  throw new Error(
-    "Firebase configuration is invalid. Check your .env file."
-  );
+const required = ["apiKey", "authDomain", "projectId", "appId"];
+const missing = required.filter((key) => !String(firebaseConfig[key] || "").trim());
+if (missing.length) {
+  throw new Error(`Missing Firebase environment values: ${missing.join(", ")}. Check the .env file in the project root.`);
 }
 
-// Initialize Firebase
-const app =
-  firebase.apps.length > 0
-    ? firebase.app()
-    : firebase.initializeApp(firebaseConfig);
+const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(firebaseConfig);
+const firebaseAuth = app.auth();
 
-// Export Firebase
+// Resolve persistence before login/listener setup. Firebase Auth persists
+// sessions across reloads in the same browser.
+export const authPersistenceReady = firebaseAuth.setPersistence(
+  firebase.auth.Auth.Persistence.LOCAL
+);
+
 export { firebase };
-
-// Firebase App
-export function getFirebase() {
-  return app;
-}
-
-// Firebase Authentication
-export function getFirebaseAuth() {
-  return app.auth();
-}
-
-// Cloud Firestore
-export function getDb() {
-  return app.firestore();
-}
-
-// Firestore Server Timestamp
-export function serverTimestamp() {
-  return firebase.firestore.FieldValue.serverTimestamp();
-}
+export const getFirebase = () => app;
+export const getFirebaseAuth = () => firebaseAuth;
+export const getDb = () => app.firestore();
+export const serverTimestamp = () => firebase.firestore.FieldValue.serverTimestamp();

@@ -20,6 +20,7 @@ function serialize(id, data) {
     updated_at: toDateString(data.updatedAt || data.updated_at),
     completed_date: toDateString(data.completedAt || data.completed_date),
     customer_received_date: toDateString(data.customerReceivedAt || data.customer_received_date),
+    received_date: toDateString(data.receivedAt || data.received_date || data.deliveredAt),
   };
 }
 
@@ -174,31 +175,6 @@ export async function apiRequest(path, options = {}) {
       return { success: true };
     }
 
-    case 'mark-order-received': {
-      if (current?.role !== 'customer') throw new Error('Customer access required.');
-
-      const reference = db().collection('orders').doc(String(body.order_id));
-
-      await db().runTransaction(async transaction => {
-        const snapshot = await transaction.get(reference);
-        if (!snapshot.exists) throw new Error('Order not found.');
-
-        const order = snapshot.data();
-        if (order.customer_id !== current.id || order.status !== 'Delivered') {
-          throw new Error('This order cannot be marked as received.');
-        }
-
-        transaction.update(reference, {
-          status: 'Completed',
-          customerReceivedAt: serverTimestamp(),
-          completedAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      });
-
-      return { success: true };
-    }
-
     case 'get-orders': {
       if (current?.role !== 'admin') throw new Error('Admin access required.');
       return { success: true, orders: await allOrders() };
@@ -218,21 +194,32 @@ export async function apiRequest(path, options = {}) {
 
         const order = snapshot.data();
 
+        if (current.role === 'admin') {
+          const allowedAdminTransitions = {
+            Pending: ['Preparing', 'Rejected'],
+            Preparing: ['Ready'],
+          };
+          const allowed = allowedAdminTransitions[order.status] || [];
+          if (!allowed.includes(nextStatus)) {
+            throw new Error(`You cannot change an order from ${order.status} to ${nextStatus}.`);
+          }
+        }
+
         if (current.role === 'rider') {
           if (order.rider_id !== current.id) {
             throw new Error('This order is not assigned to you.');
           }
 
-          if (order.status === 'Ready' && nextStatus !== 'Delivery') {
-            throw new Error('A Ready pickup can only be started as Delivery.');
-          }
+          const validRiderTransition =
+            // New flow: rider confirms the customer received the order.
+            (order.status === 'Accepted' && nextStatus === 'Received') ||
+            // Backward compatibility for older assigned orders.
+            (order.status === 'Ready' && nextStatus === 'Received') ||
+            (order.status === 'Delivery' && nextStatus === 'Received') ||
+            (order.status === 'Delivered' && nextStatus === 'Received');
 
-          if (order.status === 'Delivery' && nextStatus !== 'Delivered') {
-            throw new Error('A Delivery order can only be marked Delivered.');
-          }
-
-          if (!['Ready', 'Delivery'].includes(order.status)) {
-            throw new Error('This order is not available for rider status updates.');
+          if (!validRiderTransition) {
+            throw new Error('Only your assigned pickup can be confirmed as received.');
           }
 
           const riderSnapshot = await transaction.get(
@@ -247,10 +234,9 @@ export async function apiRequest(path, options = {}) {
           }
 
           const riderAvailability = riderSnapshot.data()?.availability || 'Offline';
-
-          if (order.status === 'Ready' && riderAvailability !== 'Busy') {
+          if (riderAvailability !== 'Busy') {
             throw new Error(
-              'Your rider status is not Busy. Refresh the dashboard before starting this delivery.',
+              'Your rider status is not Busy. Refresh the dashboard before updating this delivery.',
             );
           }
         }
@@ -262,13 +248,17 @@ export async function apiRequest(path, options = {}) {
           changedRole: current.role,
         };
 
-        if (nextStatus === 'Delivered') {
-          update.completedAt = serverTimestamp();
+        if (nextStatus === 'Received') {
+          update.receivedAt = serverTimestamp();
+          update.deliveredAt = serverTimestamp();
+        }
+        if (nextStatus === 'Rejected') {
+          update.rejectionReason = String(body.reason || 'The cafe is unable to fulfill this order.').trim();
         }
 
         transaction.update(reference, update);
 
-        if (current.role === 'rider' && nextStatus === 'Delivered') {
+        if (current.role === 'rider' && nextStatus === 'Received') {
           transaction.set(
             db().collection('users').doc(current.id),
             {
@@ -383,7 +373,7 @@ export async function apiRequest(path, options = {}) {
 
       const activeAssigned = assignedSnapshot.docs.some((document) => {
         const status = document.data()?.status;
-        return status === 'Ready' || status === 'Delivery';
+        return status === 'Accepted' || status === 'Delivery' || status === 'Ready';
       });
 
       if (activeAssigned && availability === 'Offline') {
@@ -428,10 +418,16 @@ export async function apiRequest(path, options = {}) {
           throw new Error('This pickup has already been claimed or is no longer Ready.');
         }
 
+        // Acceptance assigns the pickup. The customer-facing dashboard
+        // immediately presents Accepted as "On the way".
         transaction.update(orderReference, {
+          status: 'Accepted',
           rider_id: current.id,
           rider_name: current.name || riderSnapshot.data().name || "Monday's Rider",
+          acceptedAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
+          changedBy: current.id,
+          changedRole: 'rider',
         });
 
         transaction.update(riderReference, {
@@ -463,8 +459,8 @@ export async function apiRequest(path, options = {}) {
 
         const order = orderSnapshot.data();
 
-        if (order.rider_id !== current.id || order.status !== 'Ready') {
-          throw new Error('Only your Ready pickup can be released.');
+        if (order.rider_id !== current.id || order.status !== 'Accepted') {
+          throw new Error('Only an accepted pickup that has not started delivery can be released.');
         }
 
         transaction.update(orderReference, {

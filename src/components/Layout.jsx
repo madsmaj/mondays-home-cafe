@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useEffect } from "react";
-import { auth } from "../lib/auth";
+import { auth, useAuth } from "../lib/auth";
 import { useCartCount } from "../lib/cart";
 
 export function Navbar({ simple = false, showLogout = false }) {
@@ -123,27 +123,36 @@ export function Footer() {
         
 }
 export function Protected({ role, children }) {
-  const user = auth.getUserForRole(role);
+  const { user, loading, error } = useAuth();
   const navigate = useNavigate();
+
   useEffect(() => {
-    if (!user || user.role !== role || !user.id) {
-      navigate(
-        role === "customer"
-          ? "/customer/login"
-          : role === "admin"
-            ? "/admin/login"
-            : "/rider/login",
-        { replace: true },
-      );
+    if (loading) return;
+    if (!user || user.role !== role || !user.uid) {
+      const loginPath = role === "customer"
+        ? "/customer/login"
+        : role === "admin"
+          ? "/admin/login"
+          : "/rider/login";
+      navigate(loginPath, { replace: true });
     }
-  }, [user?.id, user?.role, role, navigate]);
-  return user?.role === role && user?.id ? (
-    children
-  ) : (
+  }, [loading, user?.uid, user?.role, role, navigate]);
+
+  if (loading) {
+    return (
+      <section className="section">
+        <div className="empty-cart"><h2>Restoring your session…</h2></div>
+      </section>
+    );
+  }
+
+  if (user?.role === role && user?.uid) return children;
+
+  return (
     <section className="section">
       <div className="empty-cart">
         <h2>Login required</h2>
-        <p>Redirecting to the correct portal…</p>
+        <p>{error || "Redirecting to the correct portal…"}</p>
       </div>
     </section>
   );

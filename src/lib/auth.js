@@ -1,5 +1,6 @@
 
-import { firebase, getFirebaseAuth, getDb } from "./firebase";
+import { firebase, getFirebaseAuth, getDb, authPersistenceReady } from "./firebase";
+import { createContext, createElement, useContext, useEffect, useState } from "react";
 
 // ------------------------------
 // Local Storage Helpers
@@ -161,10 +162,14 @@ export const auth = {
     return normalized;
   },
 
-  async clear() {
+  clearLocal() {
     localStorage.removeItem("customer");
     localStorage.removeItem("loggedUser");
     localStorage.removeItem("firebaseUser");
+  },
+
+  async clear() {
+    this.clearLocal();
 
     try {
       await getFirebaseAuth().signOut();
@@ -174,15 +179,83 @@ export const auth = {
   },
 };
 
+// Firebase Auth is authoritative; wait for its initial restore before
+// protected routes decide whether a user should be redirected.
+const AuthContext = createContext({ user: null, loading: true, error: null });
+
+export function AuthProvider({ children }) {
+  const [state, setState] = useState({ user: null, loading: true, error: null });
+
+  useEffect(() => {
+    let active = true;
+    let unsubscribe = null;
+
+    authPersistenceReady.then(() => {
+      if (!active) return;
+      unsubscribe = getFirebaseAuth().onAuthStateChanged(async (firebaseUser) => {
+        if (!active) return;
+        if (!firebaseUser) {
+          auth.clearLocal();
+          setState({ user: null, loading: false, error: null });
+          return;
+        }
+
+        try {
+          const profile = await getUserProfile(firebaseUser);
+          if (!active) return;
+          if (!profile || !["customer", "admin", "rider"].includes(profile.role)) {
+            setState({
+              user: null,
+              loading: false,
+              error: "Your account profile or role is missing. Contact the administrator.",
+            });
+            return;
+          }
+
+          if (profile.role === "customer") auth.saveCustomer(profile);
+          else auth.saveStaff(profile);
+          setState({ user: profile, loading: false, error: null });
+        } catch (error) {
+          console.error("[AUTH] Session restoration failed:", error);
+          if (active) setState({
+            user: null,
+            loading: false,
+            error: "Could not verify your profile. Check your connection and retry.",
+          });
+        }
+      });
+    }).catch((error) => {
+      console.error("[AUTH] Firebase persistence failed:", error);
+      if (active) setState({ user: null, loading: false, error: error.message });
+    });
+
+    return () => {
+      active = false;
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
+
+  return createElement(AuthContext.Provider, { value: state }, children);
+}
+
+export function useAuth() {
+  return useContext(AuthContext);
+}
+
 // ------------------------------
 // Watch Firebase Authentication
 // ------------------------------
 
 export function watchAuth(callback) {
   const firebaseAuth = getFirebaseAuth();
+  let active = true;
+  let unsubscribe = null;
 
-  return firebaseAuth.onAuthStateChanged(
+  authPersistenceReady.then(() => {
+    if (!active) return;
+    unsubscribe = firebaseAuth.onAuthStateChanged(
     async (firebaseUser) => {
+      if (!active) return;
       if (!firebaseUser) {
         localStorage.removeItem("customer");
         localStorage.removeItem("loggedUser");
@@ -227,6 +300,15 @@ export function watchAuth(callback) {
       }
     }
   );
+  }).catch((error) => {
+    console.error("[AUTH] Persistence initialization failed:", error);
+    if (active) callback(null, error);
+  });
+
+  return () => {
+    active = false;
+    if (unsubscribe) unsubscribe();
+  };
 }
 
 // ------------------------------
@@ -297,6 +379,10 @@ function firebaseLoginMessage(error) {
     case "auth/operation-not-allowed":
       return "This login method is not enabled in Firebase.";
 
+    case "auth/api-key-not-valid":
+    case "auth/invalid-api-key":
+      return "Firebase rejected the API key. Replace VITE_FIREBASE_API_KEY with the current Web App key from Firebase Project settings.";
+
     case "permission-denied":
     case "firestore/permission-denied":
       return "Missing or insufficient Firestore permissions.";
@@ -328,6 +414,7 @@ export async function emailLogin(
   const firebaseAuth = getFirebaseAuth();
 
   try {
+    await authPersistenceReady;
     const credential =
       await firebaseAuth.signInWithEmailAndPassword(
         email,
@@ -418,6 +505,7 @@ export async function customerRegister({
   }
 
   try {
+    await authPersistenceReady;
     const credential =
       await getFirebaseAuth().createUserWithEmailAndPassword(
         cleanEmail,
@@ -476,6 +564,7 @@ export async function customerRegister({
 
 export async function googleLogin() {
   try {
+    await authPersistenceReady;
     const provider =
       new firebase.auth.GoogleAuthProvider();
 
@@ -522,6 +611,13 @@ export async function googleLogin() {
 
     return profile;
   } catch (error) {
+    if (error?.code === "auth/popup-blocked") {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: "select_account" });
+      await getFirebaseAuth().signInWithRedirect(provider);
+      return null;
+    }
+
     console.error(
       "[AUTH] Google login failed:",
       error

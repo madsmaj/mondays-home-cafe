@@ -3,12 +3,23 @@ import { Link } from "react-router-dom";
 import { Navbar } from "../components/Layout";
 import { auth } from "../lib/auth";
 import { apiRequest, money } from "../lib/api";
-function OrderCard({ o, onStatus, onPayment }) {
+function OrderCard({ o, onStatus, onPayment, busy }) {
   const items = o.items || [];
   return (
     <div className="order-card">
       <h2>Order #{o.order_number || o.id}</h2>
-      <div className="order-status">{o.status}</div>
+      <div className="order-status">{({
+        Pending: "📋 New order — awaiting review",
+        Preparing: "☕ Accepted — being prepared",
+        Ready: "📦 Ready — waiting for rider",
+        Accepted: "📦 Rider accepted — pickup assigned (rider is Busy)",
+        Delivery: "🛵 On the way",
+        Delivered: "✅ Received — legacy delivery confirmation",
+        Received: "✅ Received — rider confirmed handover",
+        Completed: "✅ Received",
+        Rejected: "❌ Declined",
+        Cancelled: "🚫 Cancelled",
+      })[o.status] || o.status}</div>
       <p>📅 {o.created_at || "-"}</p>
       <h3>👤 Customer</h3>
       <p>{o.customer_name}</p>
@@ -30,18 +41,24 @@ function OrderCard({ o, onStatus, onPayment }) {
         <strong>{o.payment_status || "Pending"}</strong>
       </p>
       {o.payment_reference && <p>Reference: {o.payment_reference}</p>}
-      {o.rider_id && <p>🛵 Rider: {o.rider_name || "Assigned"}</p>}
+      {o.rider_id && <p>🛵 Assigned rider: <strong>{o.rider_name || "Assigned"}</strong></p>}
+      {o.status === "Rejected" && <p role="status"><strong>Reason:</strong> {o.rejectionReason || "The cafe could not accept this order."}</p>}
+      {o.status === "Accepted" && <p role="status">A rider accepted this order. The customer now sees “On the way”. Rider status: Busy.</p>}
+      {o.status === "Delivery" && <p role="status">The rider is on the way to the customer.</p>}
+      {["Received", "Delivered", "Completed"].includes(o.status) && <p role="status">The rider confirmed that the order was handed to and received by the customer.</p>}
       <div className="admin-actions">
         {o.status === "Pending" && (
           <>
             <button
               className="btn btn-primary"
+              disabled={busy}
               onClick={() => onStatus(o.id, "Preparing")}
             >
               Accept &amp; Prepare ☕
             </button>
             <button
               className="btn btn-secondary"
+              disabled={busy}
               onClick={() => onStatus(o.id, "Rejected")}
             >
               Reject ❌
@@ -51,23 +68,30 @@ function OrderCard({ o, onStatus, onPayment }) {
         {o.status === "Preparing" && (
           <button
             className="btn btn-primary"
+            disabled={busy}
             onClick={() => onStatus(o.id, "Ready")}
           >
             Ready For Pickup 📦
           </button>
         )}
         {o.status === "Ready" && (
-          <p>
-            <strong>
-              Waiting for an available rider to accept this pickup 🛵
-            </strong>
-          </p>
+          <p><strong>Waiting for an online rider to accept this order.</strong></p>
+        )}
+        {o.status === "Accepted" && (
+          <p><strong>Rider accepted the order. Customer status: On the way. Rider status: Busy.</strong></p>
+        )}
+        {o.status === "Delivery" && (
+          <p><strong>Rider is on the way. Rider status: Busy.</strong></p>
+        )}
+        {["Received", "Delivered", "Completed"].includes(o.status) && (
+          <p><strong>Received: the rider confirmed the customer has the order.</strong></p>
         )}
         {!["Cash on Delivery", "Paid", "Rejected"].includes(o.payment_method) &&
           o.payment_status !== "Paid" &&
           o.status !== "Rejected" && (
             <button
               className="btn btn-secondary"
+              disabled={busy}
               onClick={() => onPayment(o.id)}
             >
               Mark Payment Paid 💳
@@ -80,28 +104,60 @@ function OrderCard({ o, onStatus, onPayment }) {
 export default function Admin() {
   const user = auth.getUserForRole("admin");
   const [orders, setOrders] = useState([]);
-  const load = () => {
+  const [riders, setRiders] = useState([]);
+  const [filter, setFilter] = useState("All");
+  const [busyOrder, setBusyOrder] = useState("");
+  const load = async () => {
     if (!user?.id) return;
-    apiRequest(`get-orders?admin_id=${user.id}`)
-      .then((d) => setOrders(d.orders || []))
-      .catch((e) => console.error("Unable to load admin orders:", e));
+    try {
+      const [orderData, riderData] = await Promise.all([
+        apiRequest(`get-orders?admin_id=${user.id}`),
+        apiRequest("rider-availability"),
+      ]);
+      setOrders(orderData.orders || []);
+      setRiders(riderData.riders || []);
+    } catch (e) {
+      console.error("Unable to load admin dashboard:", e);
+    }
   };
   useEffect(() => {
     if (!user?.id) return;
     load();
-    const t = setInterval(load, 8000);
-    return () => clearInterval(t);
+    const t = setInterval(() => {
+      if (!document.hidden) load();
+    }, 12000);
+    const refreshOnFocus = () => {
+      if (!document.hidden) load();
+    };
+    document.addEventListener("visibilitychange", refreshOnFocus);
+    window.addEventListener("focus", refreshOnFocus);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", refreshOnFocus);
+      window.removeEventListener("focus", refreshOnFocus);
+    };
   }, [user?.id]);
   if (!user) return null;
-  const active = orders.filter(
+  const activeOrders = orders.filter(
     (o) => !["Completed", "Rejected", "Cancelled"].includes(o.status),
   );
-  const sales = orders
-    .filter((o) => o.status === "Completed")
-    .reduce((s, o) => s + Number(o.total || 0), 0);
+  const active = filter === "All"
+    ? activeOrders
+    : activeOrders.filter((order) =>
+        filter === "Received"
+          ? ["Received", "Delivered", "Completed"].includes(order.status)
+          : order.status === filter,
+      );
   const update = async (id, status) => {
-    if (status === "Rejected" && !confirm("Reject this order?")) return;
+    let reason = "";
+    if (status === "Rejected") {
+      if (!confirm("Reject this order? The customer will be notified.")) return;
+      reason = window.prompt("Optional: explain why this order is rejected.", "The cafe is unable to fulfill this order.");
+      if (reason === null) return;
+      reason = reason.trim() || "The cafe is unable to fulfill this order.";
+    }
     try {
+      setBusyOrder(id);
       await apiRequest("update-order-status", {
         method: "POST",
         body: {
@@ -109,23 +165,29 @@ export default function Admin() {
           status,
           changed_by: user.id,
           changed_role: "admin",
+          reason,
         },
       });
-      load();
+      await load();
     } catch (e) {
       alert(e.message);
+    } finally {
+      setBusyOrder("");
     }
   };
   const pay = async (id) => {
     if (!confirm("Mark this payment as PAID?")) return;
     try {
+      setBusyOrder(id);
       await apiRequest("update-payment", {
         method: "POST",
         body: { order_id: id, status: "Paid", changed_by: user.id },
       });
-      load();
+      await load();
     } catch (e) {
       alert(e.message);
+    } finally {
+      setBusyOrder("");
     }
   };
   const count = (s) => orders.filter((o) => o.status === s).length;
@@ -165,27 +227,53 @@ export default function Admin() {
             </button>
           </div>
         </div>
-        <div className="category-cards">
-          <Stat t="📋 Pending" v={count("Pending")} />
-          <Stat t="☕ Preparing" v={count("Preparing")} />
-          <Stat
-            t="👥 Customers Served"
-            v={new Set(orders.map((o) => o.customer_id).filter(Boolean)).size}
-          />
-          <Stat t="🧾 Total Orders" v={orders.length} />
-          <Stat t="📦 Ready" v={count("Ready")} />
-          <Stat t="🛵 Delivery" v={count("Delivery")} />
-          <Stat t="🎉 Completed" v={count("Completed")} />
-          <Stat t="💰 Sales" v={`₱${sales.toFixed(2)}`} />
+        <section id="admin-riders" style={{ margin: "24px 0" }}>
+          <h2 className="dashboard-title">🛵 Rider Availability</h2>
+          <div className="category-cards">
+            {riders.map((rider) => {
+              const status = rider.availability || "Offline";
+              const label = status === "Available" ? "Online — Available" : status === "Busy" ? "Busy — Delivering" : "Offline";
+              return (
+                <div className="category-card" key={rider.id}>
+                  <h3>{rider.name || "Rider"}</h3>
+                  <p>{rider.email || "No email"}</p>
+                  <p><strong>{rider.rider_id || rider.user_code || rider.id}</strong></p>
+                  <p aria-label={`Rider status: ${label}`}>{status === "Available" ? "🟢" : status === "Busy" ? "🟠" : "⚫"} {label}</p>
+                  {rider.updatedAt && (
+                    <p style={{ fontSize: 12, opacity: 0.7 }}>
+                      Updated: {typeof rider.updatedAt?.toDate === "function"
+                        ? rider.updatedAt.toDate().toLocaleString()
+                        : new Date(rider.updatedAt).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+            {!riders.length && <div className="empty-cart"><p>No rider accounts found.</p></div>}
+          </div>
+        </section>
+        <div className="admin-order-toolbar" style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "28px 0 16px" }}>
+          {["All", "Pending", "Preparing", "Ready", "Accepted", "Received"].map((status) => (
+            <button
+              key={status}
+              type="button"
+              className={filter === status ? "btn btn-primary" : "btn btn-secondary"}
+              aria-pressed={filter === status}
+              onClick={() => setFilter(status)}
+            >
+              {status === "All" ? `All Active (${activeOrders.length})` : `${status} (${status === "Received" ? orders.filter((o) => ["Received", "Delivered", "Completed"].includes(o.status)).length : count(status)})`}
+            </button>
+          ))}
         </div>
         <div id="admin-orders">
           {active.length ? (
             active.map((o) => (
-              <OrderCard key={o.id} o={o} onStatus={update} onPayment={pay} />
+              <OrderCard key={o.id} o={o} onStatus={update} onPayment={pay} busy={busyOrder === o.id} />
             ))
           ) : (
             <div className="empty-cart">
-              <h2>No active orders ☕</h2>
+              <h2>{filter === "All" ? "No active orders ☕" : `No ${filter.toLowerCase()} orders`}</h2>
+              <p>{filter === "All" ? "New customer orders will appear here." : "Choose another status to see more orders."}</p>
             </div>
           )}
         </div>
@@ -221,7 +309,7 @@ export function AdminHistory() {
         .includes(q.toLowerCase()),
   );
   const sales = orders
-    .filter((o) => o.status === "Completed")
+    .filter((o) => ["Received", "Delivered", "Completed"].includes(o.status))
     .reduce((s, o) => s + Number(o.total || 0), 0);
   return (
     <>
@@ -250,8 +338,8 @@ export function AdminHistory() {
             v={new Set(orders.map((o) => o.customer_id).filter(Boolean)).size}
           />
           <Stat
-            t="🎉 Completed"
-            v={orders.filter((o) => o.status === "Completed").length}
+            t="✅ Received"
+            v={orders.filter((o) => ["Received", "Delivered", "Completed"].includes(o.status)).length}
           />
           <Stat t="💰 Sales" v={`₱${sales.toFixed(2)}`} />
         </div>
@@ -269,8 +357,7 @@ export function AdminHistory() {
             "Pending",
             "Preparing",
             "Ready",
-            "Delivery",
-            "Delivered",
+            "Received",
             "Cancelled",
             "New Order",
           ].map((s) => (
